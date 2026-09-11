@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Type-checks the sources, then builds. The build is the artifact that ships,
+  # so a type error and a broken emit both fail here.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+      - name: Type-check
+        run: npm run typecheck
+      - name: Build
+        run: npm run build
+      # The committed lib/ is what `dsh plugin add` serves, so a stale artifact
+      # is a real defect rather than a cosmetic diff.
+      - name: Fail if committed lib/ is stale
+        run: |
+          if ! git diff --quiet -- lib; then
+            echo "::error::lib/ is out of date with src/. Run 'npm run build' and commit the result."
+            git diff --stat -- lib
+            exit 1
+          fi
+
+  # The check that actually guards the integration: boot a real dsh profile and
+  # assert the bundled skills are visible from a workspace with no .git — the
+  # exact case where OpenSpec's own project-level install fails.
+  #
+  # This job is deliberately tracking the *latest* dsh. The plugin is built
+  # against a dsh release candidate whose skill-provider API can still move, so
+  # this is the early warning for "a new dsh silently made the bundled skills
+  # unreachable". The cost of that choice: when upstream changes, this job fails
+  # even though nothing in this repo did. If that becomes noise, either mark the
+  # job non-required in branch protection, or pin the version below.
+  load-check:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+
+      # `dsh plugin` forwards to pnpm in the profile directory.
+      - name: Install pnpm
+        run: npm install -g pnpm
+
+      # Pin here to freeze the tested dsh version instead of tracking latest.
+      - name: Install dsh
+        run: npm install -g @deepseek-ai/dsh@latest
+
+      - name: Install the plugin into a scratch profile
+        run: dsh plugin --profile ci add "$GITHUB_WORKSPACE"
+        env:
+          DSH_HOME: ${{ runner.temp }}/dsh-home
+
+      # Asserts the openspec-* skills resolve from a non-git workspace. On a
+      # clean runner nothing else is installed, so the expected set is exact.
+      - name: Assert the bundled skills are discoverable
+        run: npm run check-load -- --profile ci --require propose,explore,apply-change,update-change,sync-specs,archive-change
+        env:
+          DSH_HOME: ${{ runner.temp }}/dsh-home
+
+      # Proves the launcher can actually run the CLI. It is executed by absolute
+      # path rather than as a bare `openspec`, because whether the chosen
+      # directory is already on the runner's PATH is environment-dependent and
+      # not what this asserts.
+      - name: Assert the openspec CLI resolves from the plugin dependency
+        run: |
+          node -e "
+          import('./lib/index.js').then(async (m) => {
+            const outcome = await m.installShim();
+            if (!outcome.ok) { console.error(outcome.message); process.exit(1); }
+            console.log('launcher:', outcome.path);
+            console.log(require('node:child_process').execFileSync(outcome.path, ['--version'], { encoding: 'utf8' }).trim());
+          }).catch((error) => { console.error(error); process.exit(1); });"
+
+  # Advisory only: the vendored skills are a snapshot of upstream's output, so
+  # drift here is expected and should not block a push. It answers "has upstream
+  # changed the skills we ship?" without failing the build.
+  vendored-drift:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+      - name: Re-vendor into a scratch copy and diff
+        run: |
+          cp -R skills /tmp/skills-before
+          npm run vendor-skills
+          if diff -rq /tmp/skills-before skills; then
+            echo "Vendored skills match the latest upstream release."
+          else
+            echo "::warning::Vendored skills differ from the latest upstream release; re-run npm run vendor-skills."
+          fi
