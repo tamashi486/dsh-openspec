@@ -1,0 +1,28 @@
+# dsh-openspec bundle patch — OpenSpec agent skills for DeepSeek Harness.
+#
+# OpenSpec's own installer (`openspec init`) writes its skills into the *project*
+# at `.agents/skills/openspec-*/SKILL.md`. That is the wrong anchor for a harness
+# plugin, for two independent reasons:
+#
+#   1. DSH only discovers project-level skills when the workspace sits inside a
+#      git repository: `findProjectRoot` in dsh-skill-filesystem probes for
+#      `.git` and nothing else. In any non-git directory the generated skills
+#      exist on disk but are never seen.
+#   2. `.agents/skills/` is a contested root — Codex, Zed Agent and OpenSpec's
+#      vendor-neutral target all claim it and rewrite each other's trees.
+#
+# So the packaged `skills/` root is mounted as a *bundled* provider instead. The
+# path is anchored at the installed package location (the profile Loader's
+# baseUrl), never relative to the process cwd, which keeps every `openspec-*`
+# skill directory resolving exactly as OpenSpec generated it.
+#
+# The skills' own filesystem footprint is untouched: `openspec/` (specs and
+# changes) still lives in the project and still belongs in git. This bundle
+# only takes over capability distribution, never data ownership.
+- insert:
+    - id: openspec-skill-filesystem
+      name: '@deepseek-ai/dsh-skill-filesystem'
+      config:
+        providerName: openspec
+        includeDefaultRoots: false
+        bundledSkillDir: !!js process.getBuiltinModule('node:path').join(process.getBuiltinModule('node:path').dirname(process.getBuiltinModule('node:module').createRequire(baseUrl).resolve('dsh-openspec/package.json')), 'skills')

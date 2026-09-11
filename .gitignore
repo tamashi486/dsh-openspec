@@ -1,0 +1,13 @@
+# Dependencies are installed from the lockfile, never committed.
+node_modules/
+
+# npm/pnpm debug logs
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
