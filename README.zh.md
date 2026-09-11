@@ -55,7 +55,7 @@ if (await pathExists(join(current, '.git'), fs)) return current;
 
 ```sh
 #!/bin/sh
-exec node "/abs/path/to/node_modules/@fission-ai/openspec/bin/openspec.js" "$@"
+exec "/abs/path/to/node" "/abs/path/to/node_modules/@fission-ai/openspec/bin/openspec.js" "$@"
 ```
 
 这个安排还顺带带来两个结果：
@@ -67,11 +67,21 @@ exec node "/abs/path/to/node_modules/@fission-ai/openspec/bin/openspec.js" "$@"
 
 ## 维护
 
+插件用 TypeScript 编写。`src/` 是唯一真源，`lib/` 是编译产物且**已提交入库**——因为 `dsh plugin add` 直接按原样加载包，而 pnpm 默认会阻止 git 托管插件的 `prepare` 脚本，若把构建放到安装期，每个使用者都得先改 `allowBuilds`。
+
+```bash
+npm ci
+npm run typecheck    # 同时检查 src/ 与 scripts/
+npm run build        # src/ -> lib/（含 lib/types/）
+```
+
+CI 会在 `lib/` 相对于 `src/` 过期时报错，所以每次都要把重新构建的结果一起提交。
+
 skill 是从上游 vendor 来的，因为上游在安装时按工具渲染它们，其 npm 包里并不带 `.agents/skills/` 目录树。刷新方式：
 
 ```bash
-node scripts/vendor-skills.mjs                 # 最新已发布版本
-node scripts/vendor-skills.mjs --version 1.13.0
+npm run vendor-skills                              # 最新已发布版本
+npm run vendor-skills -- --version 1.13.0
 ```
 
 该脚本会在临时目录里运行上游自己的安装器，参数为 `--tools agents`——这是上游的中立、仅 skill 目标：它不生成任何 `opsx-*` 命令文件，因此交叉引用会被渲染成 skill 名称，正好对应 DSH 寻址其 skill 目录的方式。随后把 `package.json` 中 `@fission-ai/openspec` 的版本范围对齐到它打印的版本。
@@ -80,7 +90,7 @@ node scripts/vendor-skills.mjs --version 1.13.0
 
 ```bash
 dsh plugin --profile opstest add "$PWD"
-node scripts/check-load.mjs --profile opstest --require propose,apply-change
+npm run check-load -- --profile opstest --require propose,apply-change
 ```
 
 该检查会走 dsh 真实的 `runProfile` 路径启动 profile，并断言 skill 在**没有 `.git` 的工作区**里可见——正是直接安装会失败的那种情形。
@@ -89,11 +99,12 @@ node scripts/check-load.mjs --profile opstest --require propose,apply-change
 
 | 路径 | 作用 |
 |---|---|
+| `src/index.ts` | 插件源码：CLI 解析、PATH 启动器、`/openspec` 命令 |
+| `lib/` | 编译产物（已提交，dsh 实际加载的就是它） |
 | `cordis.patch.yml` | 注册内置 skill 提供方 |
 | `skills/` | vendor 来的 `openspec-*/SKILL.md`（生成物，见 `skills/VENDORED.md`） |
-| `lib/index.js` | CLI 解析、PATH 启动器、`/openspec` 命令 |
-| `scripts/vendor-skills.mjs` | 从上游重新 vendor `skills/` |
-| `scripts/check-load.mjs` | 加载期集成检查 |
+| `scripts/vendor-skills.ts` | 从上游重新 vendor `skills/`（经 `tsx` 运行） |
+| `scripts/check-load.ts` | 加载期集成检查（经 `tsx` 运行） |
 
 ## 许可
 

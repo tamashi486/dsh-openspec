@@ -70,7 +70,7 @@ clobbering an `openspec` it did not write:
 
 ```sh
 #!/bin/sh
-exec node "/abs/path/to/node_modules/@fission-ai/openspec/bin/openspec.js" "$@"
+exec "/abs/path/to/node" "/abs/path/to/node_modules/@fission-ai/openspec/bin/openspec.js" "$@"
 ```
 
 Two further consequences fall out of this arrangement:
@@ -85,12 +85,25 @@ in git. The plugin distributes capability; it does not own your specs.
 
 ## Maintaining
 
+The plugin is TypeScript. `src/` is the source of truth; `lib/` is the compiled
+output and **is committed**, because `dsh plugin add` loads the package as-is and
+pnpm blocks a git-hosted plugin's `prepare` script by default — so a build step at
+install time would mean every consumer editing `allowBuilds` first.
+
+```bash
+npm ci
+npm run typecheck    # both src/ and scripts/
+npm run build        # src/ -> lib/ (+ lib/types/)
+```
+
+CI fails if `lib/` is stale relative to `src/`, so always commit the rebuild.
+
 The skills are vendored from upstream, because upstream renders them per tool at
 install time and ships no `.agents/skills/` tree in its npm package. To refresh:
 
 ```bash
-node scripts/vendor-skills.mjs                 # latest published version
-node scripts/vendor-skills.mjs --version 1.13.0
+npm run vendor-skills                              # latest published version
+npm run vendor-skills -- --version 1.13.0
 ```
 
 This runs upstream's own installer in a throwaway directory with
@@ -104,7 +117,7 @@ profile):
 
 ```bash
 dsh plugin --profile opstest add "$PWD"
-node scripts/check-load.mjs --profile opstest --require propose,apply-change
+npm run check-load -- --profile opstest --require propose,apply-change
 ```
 
 The check boots the profile through dsh's real `runProfile` path and asserts the
@@ -115,11 +128,12 @@ install fails.
 
 | Path | Role |
 |---|---|
+| `src/index.ts` | Plugin source: CLI resolution, PATH launcher, `/openspec` command |
+| `lib/` | Compiled output (committed; what dsh loads) |
 | `cordis.patch.yml` | Registers the bundled skill provider |
 | `skills/` | Vendored `openspec-*/SKILL.md` (generated; see `skills/VENDORED.md`) |
-| `lib/index.js` | CLI resolution, PATH launcher, `/openspec` command |
-| `scripts/vendor-skills.mjs` | Re-vendors `skills/` from upstream |
-| `scripts/check-load.mjs` | Load-time integration check |
+| `scripts/vendor-skills.ts` | Re-vendors `skills/` from upstream (run via `tsx`) |
+| `scripts/check-load.ts` | Load-time integration check (run via `tsx`) |
 
 ## Licence
 

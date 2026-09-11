@@ -5,21 +5,28 @@
   "description": "OpenSpec (spec-driven development) as a DeepSeek Harness plugin: ships the OpenSpec agent skills as a bundled skill provider and resolves the openspec CLI from the plugin's own dependency, so no global install and no per-project .agents/skills copy is required.",
   "type": "module",
   "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
   "exports": {
-    ".": "./lib/index.js",
-    "./package.json": "./package.json"
-  },
-  "exports": {
-    ".": "./lib/index.js",
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
-    "lib",
+    "lib/index.js",
+    "lib/types/**/*.d.ts",
     "cordis.patch.yml",
     "skills",
     "README.md",
     "README.zh.md"
   ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.scripts.json",
+    "vendor-skills": "tsx scripts/vendor-skills.ts",
+    "check-load": "tsx scripts/check-load.ts"
+  },
   "keywords": [
     "dsh-plugin",
     "deepseek-harness",
@@ -39,5 +46,13 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh-commands": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-skill": "0.1.5-rc.2",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.0"
   }
 }
