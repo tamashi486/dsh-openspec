@@ -55,7 +55,7 @@ openspec init --tools agents     # 生成 openspec/ 与项目配置
 ```
 
 也可以直接在对话里开口：skill 检测到缺少 OpenSpec 根目录时会主动提出帮你跑
-`openspec init`（`/openspec init <path>` 也行）。
+`openspec init`（`/openspec init <绝对路径>` 也行）。
 
 之后用自然语言驱动工作流即可：
 
@@ -71,10 +71,10 @@ apply 时才开始实现。
 
 | 命令 | 用途 |
 |---|---|
-| `/openspec doctor` | 一屏诊断：skill 数量、CLI 版本与入口、启动器状态 |
+| `/openspec doctor` | 一屏诊断：skill 数量、CLI 版本与入口，以及 shell 实际把 `openspec` 解析到哪个二进制 |
 | `/openspec shim` | 把 `openspec` 启动器（重新）安装到 PATH |
 | `/openspec uninstall-shim` | 移除启动器（仅当它是本插件写入的） |
-| `/openspec init <path>` | 在项目目录执行 `openspec init --tools agents`。请传**绝对路径**——相对路径会按 profile 服务器进程的 cwd 解析，而不是你的工作区 |
+| `/openspec init <绝对路径>` | 在项目目录执行 `openspec init --tools agents`。绝对路径是**强制要求**而非建议：相对路径会按 profile 服务器进程的 cwd 解析，命令会直接拒绝，而不是初始化错的目录树 |
 
 ## 排障
 
@@ -83,8 +83,9 @@ apply 时才开始实现。
 | 诊断输出 | 含义 / 处理 |
 |---|---|
 | `CLI package : MISSING` | CLI 依赖没有装上。对本插件重跑一次 `dsh plugin add`（或 `dsh plugin add @fission-ai/openspec`），然后 `/openspec shim`。 |
-| `PATH launcher : absent` | skill 调用的裸 `openspec` 解析不到。处理：`/openspec shim`。 |
-| `PATH launcher : foreign (<path>)` | PATH 上已有一个不是本插件写入的 `openspec`；插件不会动它。若它排在 PATH 前面，skill 实际调用的就是这个二进制，而不是插件的。 |
+| `PATH resolves : absent` | PATH 上没有任何 `openspec`，skill 的裸命令解析不到。处理：`/openspec shim`。 |
+| `PATH resolves : foreign (<path>)` | 实际运行的是别人的 `openspec`，命令本身解析正常，这**不是**故障。skill 调用的就是那个二进制；若其版本与本插件 vendor 的 skill 产生漂移，请把插件的启动器放到更靠前的 PATH 目录。 |
+| 启动器 `shadowed` | 启动器已写入，但 PATH 上更靠前的条目仍然优先。把它的目录在 PATH 中提前，或移除另一个安装。 |
 | 启动器 `could not be installed (no-writable-path-dir)` | PATH 上没有可写目录。加一个（比如 `~/.local/bin`），重载 profile 后重试——或者自行全局安装 OpenSpec。 |
 
 优先级说明：在 **git** 仓库里执行过 `openspec init` 后，DSH 还会发现项目自己的

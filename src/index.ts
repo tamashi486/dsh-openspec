@@ -20,11 +20,11 @@
  * @module dsh-openspec
  */
 
-import { access, constants, mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
+import { access, chmod, constants, mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { delimiter, dirname, join, resolve } from 'node:path';
+import { delimiter, dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Context } from '@deepseek-ai/cordis';
 import type { CommandDefinition } from '@deepseek-ai/dsh-commands';
@@ -53,21 +53,26 @@ export type ShimInstallResult =
   | { readonly ok: false; readonly reason: ShimFailureReason; readonly path?: string; readonly message: string };
 
 /** Why the launcher could not be installed. */
-export type ShimFailureReason = 'unresolved' | 'foreign' | 'no-writable-path-dir';
+export type ShimFailureReason = 'unresolved' | 'foreign' | 'shadowed' | 'no-writable-path-dir';
+
+/**
+ * What a shell resolves `openspec` to, and whether it is ours.
+ *
+ * A discriminated union rather than an optional `path`, because the two
+ * resolvable states always have a path and the unresolvable one never does.
+ */
+export type ShimState =
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'installed'; readonly path: string }
+  | { readonly kind: 'foreign'; readonly path: string };
+
+/** The kind alone, for callers that only branch on it. */
+export type ShimStateKind = ShimState['kind'];
 
 /** Outcome of removing the PATH launcher. */
 export type ShimRemoveResult =
   | { readonly ok: true; readonly path: string }
-  | { readonly ok: false; readonly reason: ShimState; readonly path: string | undefined };
-
-/** State of the launcher as found on PATH. */
-export type ShimState = 'installed' | 'absent' | 'foreign';
-
-/** A located launcher. */
-interface ShimStatus {
-  readonly path: string | undefined;
-  readonly state: ShimState;
-}
+  | { readonly ok: false; readonly reason: ShimStateKind; readonly path: string | undefined };
 
 /** The subset of a package manifest this plugin reads. */
 interface PackageManifest {
@@ -158,14 +163,26 @@ function shimText(entry: string): string {
 }
 
 /**
- * Candidate directories for the launcher, most specific first.
+ * Directories on PATH, in the order a shell resolves them.
  *
- * Only directories already on the invoking PATH are eligible: the whole point
- * is to be resolvable from the agent's shell without a profile restart, and
- * writing outside PATH would silently not help.
+ * Order is load-bearing: a shell runs the *first* matching `openspec` it finds,
+ * so any statement about which command will run has to come from this order and
+ * nothing else.
  */
-function shimCandidates(): string[] {
-  const pathEntries = (process.env['PATH'] ?? '').split(delimiter).filter((entry) => entry.length > 0);
+function pathDirs(): string[] {
+  return (process.env['PATH'] ?? '').split(delimiter).filter((entry) => entry.length > 0);
+}
+
+/**
+ * Where to *write* the launcher, first choice first.
+ *
+ * This is a preference order, deliberately not PATH order: any candidate is
+ * already on PATH, so all else being equal the most conventional location wins.
+ * It must not be used to decide which command a shell would resolve — see
+ * {@link pathDirs} for that.
+ */
+function installDirPreference(): string[] {
+  const pathEntries = pathDirs();
   const preferred = [
     // The Node installation's bin dir sits on PATH and is user-writable under a
     // version manager, which is the common local setup.
@@ -184,12 +201,6 @@ function shimCandidates(): string[] {
     seen.add(candidate);
     candidates.push(candidate);
   }
-  // Anything else on PATH is a last resort, still before giving up.
-  for (const entry of pathEntries) {
-    if (seen.has(entry)) continue;
-    seen.add(entry);
-    candidates.push(entry);
-  }
   return candidates;
 }
 
@@ -204,32 +215,43 @@ async function isExecutable(path: string): Promise<boolean> {
 }
 
 /**
- * Report the current state of the launcher without mutating anything.
+ * Report what a shell resolves `openspec` to, without mutating anything.
  *
- * Distinguishes "already ours and correct" from "absent" and from "occupied by
- * someone else's openspec", because only the middle case may be overwritten.
+ * The scan follows PATH order, because that is the only order that answers the
+ * question. A launcher this plugin wrote is *not* automatically the one that
+ * runs: a directory earlier on PATH wins, and reporting "installed" for a
+ * shadowed launcher would be a false positive — the skills would silently call
+ * whatever CLI came first instead.
  */
-async function shimStatus(): Promise<ShimStatus> {
-  for (const directory of shimCandidates()) {
+async function shimStatus(): Promise<ShimState> {
+  for (const directory of pathDirs()) {
     const path = join(directory, SHIM_NAME);
     if (!(await isExecutable(path))) continue;
     let existing: string;
     try {
       existing = await readFile(path, 'utf8');
     } catch {
-      return { path, state: 'foreign' };
+      return { kind: 'foreign', path };
     }
-    return { path, state: existing.includes('Installed by dsh-openspec') ? 'installed' : 'foreign' };
+    return existing.includes('Installed by dsh-openspec') ? { kind: 'installed', path } : { kind: 'foreign', path };
   }
-  return { path: undefined, state: 'absent' };
+  return { kind: 'absent' };
 }
 
 /**
- * Write the launcher into the first writable PATH directory.
+ * Install the launcher so that it is what a shell actually resolves.
  *
- * An existing launcher that is not ours is never clobbered: a user's own
- * `openspec` (a real global install, a wrapper) outranks this convenience, and
- * the caller is told where it is so the conflict is legible.
+ * Three things this deliberately does *not* do:
+ *
+ * - It never overwrites an `openspec` this plugin did not write. A user's own
+ *   install outranks this convenience, so that case is reported rather than
+ *   papered over.
+ * - It does not treat "the file was written" as success. The launcher only helps
+ *   if it is the *first* `openspec` on PATH, so the result is re-probed in PATH
+ *   order after writing and a shadowed launcher is reported as such.
+ * - It does not rely on `mode` to make the file executable. `mode` is ignored
+ *   for a path that already exists, so a launcher that lost its execute bit
+ *   would be rewritten and still not run; the mode is applied explicitly.
  */
 export async function installShim(): Promise<ShimInstallResult> {
   const entry = resolveCliEntry();
@@ -241,46 +263,52 @@ export async function installShim(): Promise<ShimInstallResult> {
     };
   }
 
-  for (const directory of shimCandidates()) {
+  // A foreign command anywhere on PATH means the shell already resolves
+  // `openspec`; writing ours would either be shadowed by it or shadow it.
+  const existing = await shimStatus();
+  if (existing.kind === 'foreign') {
+    return {
+      ok: false,
+      reason: 'foreign',
+      path: existing.path,
+      message: `${existing.path} already provides \`openspec\` and was not written by dsh-openspec; leaving it untouched. The skills will call that binary.`
+    };
+  }
+
+  for (const directory of installDirPreference()) {
     const path = join(directory, SHIM_NAME);
-    if (await isExecutable(path)) {
-      let existing: string | undefined;
-      try {
-        existing = await readFile(path, 'utf8');
-      } catch {
-        existing = undefined;
-      }
-      if (existing !== undefined && !existing.includes('Installed by dsh-openspec')) {
-        return {
-          ok: false,
-          reason: 'foreign',
-          path,
-          message: `${path} already exists and was not written by dsh-openspec; leaving it untouched.`
-        };
-      }
-    }
     try {
       await mkdir(directory, { recursive: true });
-      await writeFile(path, shimText(entry), { mode: 0o755 });
-      return { ok: true, path, entry };
+      await writeFile(path, shimText(entry));
+      await chmod(path, 0o755);
     } catch {
       continue;
     }
+    const resolved = await shimStatus();
+    if (resolved.kind === 'installed' && resolved.path === path) return { ok: true, path, entry };
+    // Written, but something earlier on PATH still wins. Report it rather than
+    // claiming a success the skills would not see.
+    return {
+      ok: false,
+      reason: 'shadowed',
+      path,
+      message: `Wrote ${path}, but \`openspec\` still resolves to ${resolved.kind === 'absent' ? 'nothing' : resolved.path}. Earlier PATH entries take precedence; put ${directory} first on PATH, or remove the other install.`
+    };
   }
 
   return {
     ok: false,
     reason: 'no-writable-path-dir',
-    message: 'No writable directory on PATH was found; pass an explicit directory or add one to PATH.'
+    message: `None of the preferred PATH directories (${installDirPreference().join(', ') || 'none on PATH'}) is writable. Make one writable (for example ~/.local/bin) and put it on PATH, or install OpenSpec globally with \`npm i -g ${UPSTREAM}\`.`
   };
 }
 
 /** Remove the launcher if this plugin installed it. */
 export async function removeShim(): Promise<ShimRemoveResult> {
-  const { path, state } = await shimStatus();
-  if (state !== 'installed' || path === undefined) return { ok: false, reason: state, path };
-  await unlink(path);
-  return { ok: true, path };
+  const state = await shimStatus();
+  if (state.kind !== 'installed') return { ok: false, reason: state.kind, path: state.kind === 'foreign' ? state.path : undefined };
+  await unlink(state.path);
+  return { ok: true, path: state.path };
 }
 
 /** A captured CLI execution. */
@@ -354,33 +382,50 @@ async function countSkills(): Promise<number> {
 /**
  * Compose a one-screen diagnosis of the plugin's runtime state.
  *
+ * The launcher line reports what a shell actually resolves, and the advice is
+ * chosen from that. A `foreign` result is *not* a fault: `openspec` resolves
+ * fine, it is simply someone else's binary, so telling the user to run
+ * `/openspec shim` would both misdescribe the state and prescribe a repair that
+ * refuses to act.
+ *
  * @returns Human-readable report, also returned verbatim by `/openspec doctor`.
  */
 async function diagnose(): Promise<string> {
   const installedVersion = await readCliVersion();
   const cli = resolveCliEntry();
   const shim = await shimStatus();
+  const launcher =
+    shim.kind === 'absent' ? 'absent' : `${shim.kind} (${shim.path})`;
   const lines = [
     'dsh-openspec',
     `  skills        : bundled provider (skills/, ${await countSkills()} skill(s))`,
     `  CLI package   : ${installedVersion === undefined ? 'MISSING' : `${UPSTREAM}@${installedVersion}`}`,
     `  CLI entry     : ${cli ?? 'unresolved'}`,
-    `  PATH launcher : ${shim.state}${shim.path === undefined ? '' : ` (${shim.path})`}`
+    `  PATH resolves : ${launcher}`
   ];
   if (installedVersion === undefined) {
-    lines.push('', `Fix: dsh plugin add ${UPSTREAM}`, 'Then: /openspec shim');
-  } else if (shim.state !== 'installed') {
+    lines.push('', `The CLI dependency is missing, so no \`openspec\` can run. Fix: dsh plugin add ${UPSTREAM}`, 'Then: /openspec shim');
+  } else if (shim.kind === 'absent') {
     lines.push('', 'The skills call the bare `openspec` command, which will not resolve', 'until the launcher is installed. Fix: /openspec shim');
+  } else if (shim.kind === 'foreign') {
+    lines.push(
+      '',
+      `\`openspec\` resolves to ${shim.path}, which dsh-openspec did not write.`,
+      'The skills will call that binary. If it is an OpenSpec version whose output',
+      `differs from this plugin's vendored skills (${installedVersion}), install the`,
+      'launcher into a directory earlier on PATH, or remove the other install and',
+      'run /openspec shim.'
+    );
   }
   return lines.join('\n');
 }
 
-/** True when the PATH launcher is present and owned by this plugin. */
-async function shimResolves(): Promise<boolean> {
-  return (await shimStatus()).state === 'installed';
+/** Whether a shell resolves `openspec` at all, whoever provides it. */
+async function openspecResolves(): Promise<boolean> {
+  return (await shimStatus()).kind !== 'absent';
 }
 
-/** Split a command invocation's raw input into whitespace-free arguments. */
+/** Split a command invocation's raw input into whitespace-separated arguments. */
 function inputArgs(rawInput: string): string[] {
   return rawInput.trim().split(/\s+/).filter((part) => part.length > 0);
 }
@@ -413,12 +458,20 @@ function openspecCommand(): CommandDefinition {
 
         case 'init': {
           // A DSH human command runs in the profile's process, so the project
-          // directory cannot be inferred — it is required, not defaulted.
+          // directory cannot be inferred: a relative path would resolve against
+          // the server's cwd, not the workspace. Requiring an absolute path is
+          // the only honest option — guessing would initialize the wrong tree.
           const target = rest[0];
           if (target === undefined) {
-            return { kind: 'error', text: 'usage: /openspec init <path>  (the project directory to initialize)' };
+            return { kind: 'error', text: 'usage: /openspec init <absolute-path>  (the project directory to initialize)' };
           }
-          const result = await runCli(['init', '--tools', 'agents'], resolve(target));
+          if (!isAbsolute(target)) {
+            return {
+              kind: 'error',
+              text: `"${target}" is not an absolute path. This command runs in the profile's process, so a relative path would resolve against ${process.cwd()} rather than your workspace. Pass an absolute path.`
+            };
+          }
+          const result = await runCli(['init', '--tools', 'agents'], target);
           const output = `${result.stdout}${result.stderr}`.trim();
           return result.status === 0
             ? { kind: 'success', text: output.length > 0 ? output : '(no output)' }
@@ -454,15 +507,22 @@ export function apply(ctx: Context): void {
   });
 
   // Probe once, asynchronously, so a missing CLI is reported at load rather than
-  // discovered mid-workflow.
+  // discovered mid-workflow. The catch is not decoration: this promise is
+  // detached, so an unexpected rejection would surface as an unhandled rejection
+  // in the profile process rather than as a log line.
   void (async () => {
     if (resolveCliEntry() === undefined) {
       ctx.logger.warn(`${name}: ${UPSTREAM} is not installed; the openspec-* skills will not run. Install it with \`dsh plugin add ${UPSTREAM}\`.`);
       return;
     }
-    if (await shimResolves()) return;
+    // "Resolves" is the question, not "resolves to ours": a user's own global
+    // openspec is a working setup, so warning about it on every load would be a
+    // false alarm.
+    if (await openspecResolves()) return;
     const outcome = await installShim();
     if (outcome.ok) ctx.logger.info(`${name}: installed the \`openspec\` launcher at ${outcome.path} (remove with \`/openspec uninstall-shim\`).`);
-    else ctx.logger.warn(`${name}: \`openspec\` is not on PATH and the launcher could not be installed (${outcome.reason}). Run \`/openspec doctor\`.`);
-  })();
+    else ctx.logger.warn(`${name}: \`openspec\` does not resolve and the launcher could not be installed (${outcome.reason}). ${outcome.message}`);
+  })().catch((error: unknown) => {
+    ctx.logger.warn(`${name}: the load-time check failed: ${error instanceof Error ? error.message : String(error)}`);
+  });
 }

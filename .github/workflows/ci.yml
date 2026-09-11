@@ -55,7 +55,9 @@ jobs:
       - name: Install pnpm
         run: npm install -g pnpm
 
-      # Pin here to freeze the tested dsh version instead of tracking latest.
+      # Deliberately unpinned: see the load-check job comment for why tracking
+      # the latest dsh is the point. Replace `@latest` with an exact version to
+      # freeze what this job tests.
       - name: Install dsh
         run: npm install -g @deepseek-ai/dsh@latest
 

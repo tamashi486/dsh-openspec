@@ -62,7 +62,7 @@ openspec init --tools agents     # scaffolds openspec/ and the project config
 ```
 
 Or just ask in a conversation: the skills detect a missing OpenSpec root and
-offer to run `openspec init` for you (`/openspec init <path>` works too).
+offer to run `openspec init` for you (`/openspec init <absolute-path>` works too).
 
 Then drive the workflow in plain language:
 
@@ -79,10 +79,10 @@ apply.
 
 | Command | Purpose |
 |---|---|
-| `/openspec doctor` | One-screen diagnosis: skill count, CLI version and entry, launcher state |
+| `/openspec doctor` | One-screen diagnosis: skill count, CLI version and entry, and what a shell actually resolves `openspec` to |
 | `/openspec shim` | (Re)install the `openspec` launcher onto PATH |
 | `/openspec uninstall-shim` | Remove the launcher (only if this plugin wrote it) |
-| `/openspec init <path>` | Run `openspec init --tools agents` in a project directory. Pass an **absolute** path — a relative one resolves against the profile server's cwd, not your workspace |
+| `/openspec init <absolute-path>` | Run `openspec init --tools agents` in a project directory. An absolute path is **required**, not merely advised: a relative one would resolve against the profile server's cwd, and the command rejects it rather than initializing the wrong tree |
 
 ## Troubleshooting
 
@@ -91,8 +91,9 @@ Run `/openspec doctor` and match what it says:
 | Diagnosis | Meaning / fix |
 |---|---|
 | `CLI package : MISSING` | The CLI dependency didn't install. Re-run `dsh plugin add` for this plugin (or `dsh plugin add @fission-ai/openspec`), then `/openspec shim`. |
-| `PATH launcher : absent` | The skills' bare `openspec` won't resolve. Fix: `/openspec shim`. |
-| `PATH launcher : foreign (<path>)` | An `openspec` this plugin did not write is already on PATH; it is left untouched. If it comes first on PATH, that binary — not the plugin's — is what the skills will call. |
+| `PATH resolves : absent` | Nothing on PATH provides `openspec`, so the skills' bare command won't resolve. Fix: `/openspec shim`. |
+| `PATH resolves : foreign (<path>)` | Someone else's `openspec` is what actually runs, so the command resolves fine and this is **not** a fault. The skills call that binary; if its version drifts from the vendored skills, put the plugin's launcher in an earlier PATH directory. |
+| launcher `shadowed` | The launcher was written but an earlier PATH entry still wins. Move its directory ahead on PATH, or remove the other install. |
 | launcher `could not be installed (no-writable-path-dir)` | No directory on your PATH is writable. Add one (e.g. `~/.local/bin`), reload the profile, and retry — or install OpenSpec globally yourself. |
 
 Precedence note: after `openspec init` inside a **git** repository, DSH also

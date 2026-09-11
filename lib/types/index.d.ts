@@ -41,18 +41,33 @@ export type ShimInstallResult = {
     readonly message: string;
 };
 /** Why the launcher could not be installed. */
-export type ShimFailureReason = 'unresolved' | 'foreign' | 'no-writable-path-dir';
+export type ShimFailureReason = 'unresolved' | 'foreign' | 'shadowed' | 'no-writable-path-dir';
+/**
+ * What a shell resolves `openspec` to, and whether it is ours.
+ *
+ * A discriminated union rather than an optional `path`, because the two
+ * resolvable states always have a path and the unresolvable one never does.
+ */
+export type ShimState = {
+    readonly kind: 'absent';
+} | {
+    readonly kind: 'installed';
+    readonly path: string;
+} | {
+    readonly kind: 'foreign';
+    readonly path: string;
+};
+/** The kind alone, for callers that only branch on it. */
+export type ShimStateKind = ShimState['kind'];
 /** Outcome of removing the PATH launcher. */
 export type ShimRemoveResult = {
     readonly ok: true;
     readonly path: string;
 } | {
     readonly ok: false;
-    readonly reason: ShimState;
+    readonly reason: ShimStateKind;
     readonly path: string | undefined;
 };
-/** State of the launcher as found on PATH. */
-export type ShimState = 'installed' | 'absent' | 'foreign';
 /**
  * Resolve the CLI's entry script.
  *
@@ -62,11 +77,19 @@ export type ShimState = 'installed' | 'absent' | 'foreign';
  */
 export declare function resolveCliEntry(): string | undefined;
 /**
- * Write the launcher into the first writable PATH directory.
+ * Install the launcher so that it is what a shell actually resolves.
  *
- * An existing launcher that is not ours is never clobbered: a user's own
- * `openspec` (a real global install, a wrapper) outranks this convenience, and
- * the caller is told where it is so the conflict is legible.
+ * Three things this deliberately does *not* do:
+ *
+ * - It never overwrites an `openspec` this plugin did not write. A user's own
+ *   install outranks this convenience, so that case is reported rather than
+ *   papered over.
+ * - It does not treat "the file was written" as success. The launcher only helps
+ *   if it is the *first* `openspec` on PATH, so the result is re-probed in PATH
+ *   order after writing and a shadowed launcher is reported as such.
+ * - It does not rely on `mode` to make the file executable. `mode` is ignored
+ *   for a path that already exists, so a launcher that lost its execute bit
+ *   would be rewritten and still not run; the mode is applied explicitly.
  */
 export declare function installShim(): Promise<ShimInstallResult>;
 /** Remove the launcher if this plugin installed it. */
