@@ -24,13 +24,57 @@
  * exits rather than returning to a normal event loop.
  */
 
-import { mkdtemp, rm } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { existsSync, realpathSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const DSH_INSTALL = process.env.DSH_INSTALL_DIR ?? '/Users/yihuichen/.nvm/versions/node/v22.22.0/lib/node_modules/@deepseek-ai/dsh';
+/**
+ * Locate the installed `@deepseek-ai/dsh` package.
+ *
+ * CI and other machines have neither this developer's nvm prefix nor the same
+ * release, so the location is resolved rather than assumed — `dsh` is found on
+ * PATH and its install root derived from there. `DSH_INSTALL_DIR` overrides.
+ */
+function resolveDshInstall() {
+  if (process.env.DSH_INSTALL_DIR !== undefined && process.env.DSH_INSTALL_DIR !== '') {
+    return process.env.DSH_INSTALL_DIR;
+  }
+  const located = spawnSync('which', ['dsh'], { encoding: 'utf8' });
+  if (located.status === 0) {
+    // <prefix>/bin/dsh is a symlink into <prefix>/lib/node_modules/@deepseek-ai/dsh/lib/bin.js
+    const binary = realpathSync(located.stdout.trim());
+    const libDir = dirname(binary);
+    const install = dirname(libDir);
+    if (existsSync(join(install, 'package.json')) && existsSync(join(libDir, 'bin.js'))) return install;
+  }
+  throw new Error('cannot locate the dsh installation; set DSH_INSTALL_DIR to the @deepseek-ai/dsh package directory');
+}
+
+/**
+ * Resolve the internal module that owns `runProfile`.
+ *
+ * dsh's build emits content-hashed filenames (`profile-boot-<hash>.js`) and a
+ * stable `profile-boot.js` that merely re-exports from one of them. Which hash
+ * exists varies by release, so the file is discovered by pattern instead of
+ * pinned — pinning would make this check fail on every dsh upgrade for a reason
+ * that has nothing to do with this plugin.
+ *
+ * @param libDir - The dsh package's `lib` directory.
+ * @returns Absolute path to the module exporting `runProfile`.
+ */
+async function resolveProfileBoot(libDir) {
+  const entries = await readdir(libDir);
+  const candidates = entries.filter((entry) => /^profile-boot.*\.js$/.test(entry)).sort();
+  if (candidates.length === 0) throw new Error(`no profile-boot module found in ${libDir}`);
+  for (const candidate of candidates) {
+    const module = await import(pathToFileURL(join(libDir, candidate)).href);
+    if (typeof module.runProfile === 'function') return join(libDir, candidate);
+  }
+  throw new Error(`none of ${candidates.join(', ')} exported runProfile in ${libDir}`);
+}
 
 /** Parse `--key value` arguments. */
 function parseArgs(argv) {
@@ -59,9 +103,10 @@ function nearestGitDir(start) {
   }
 }
 
+const DSH_INSTALL = resolveDshInstall();
 const appBoot = await import(new URL('node_modules/@deepseek-ai/dsh-app-boot/lib/index.js', pathToFileURL(`${DSH_INSTALL}/`).href));
 const { loadLayeredEnv } = appBoot;
-const { runProfile } = await import(pathToFileURL(join(DSH_INSTALL, 'lib/profile-boot-BP_C0vpU.js')).href);
+const { runProfile } = await import(pathToFileURL(await resolveProfileBoot(join(DSH_INSTALL, 'lib'))).href);
 
 const scratch = options.cwd === undefined ? await mkdtemp(join(tmpdir(), 'dsh-openspec-nogit-')) : undefined;
 const workspace = options.cwd ?? scratch;
